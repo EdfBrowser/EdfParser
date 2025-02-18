@@ -1,4 +1,3 @@
-using System.Collections;
 using System.IO;
 
 namespace Parser
@@ -84,7 +83,7 @@ namespace Parser
             RecordSize = 0L;
 
             const int MAXSIGNALS = 1000;
-            SamplePos = new long[MAXSIGNALS];
+            SamplePos = new int[MAXSIGNALS];
             Annotation = new bool[MAXSIGNALS];
             MappedSignals = new int[MAXSIGNALS];
             BufOffset = new long[MAXSIGNALS];
@@ -114,18 +113,77 @@ namespace Parser
         internal VariableLengthInt NumberOfSamplesInDataRecord { get; }
         internal VariableLengthString SignalsReserved { get; }
 
-        // TODO: 重构
-        internal long[] SamplePos { get; set; }
+        // TODO: 重构_signalsMetadata 
+        internal int[] SamplePos { get; set; }
         internal bool[] Annotation { get; set; }
         internal int[] MappedSignals { get; set; }
+        // 一个数据块字节数
         internal long RecordSize { get; set; }
         internal long[] BufOffset { get; set; }
         internal double[] BitValues { get; set; }
         internal double[] Offsets { get; set; }
 
-        internal void Close()
+
+        internal void Read(BinaryReader reader)
         {
-            // 关闭流
+            Version.Read(reader);
+            PatientID.Read(reader);
+            RecordID.Read(reader);
+            StartDate.Read(reader);
+            StartTime.Read(reader);
+            NumberOfBytesInHeader.Read(reader);
+            Reserved.Read(reader);
+            NumberOfDataRecords.Read(reader);
+            DurationOfDataRecord.Read(reader);
+            NumberOfSignals.Read(reader);
+
+
+            int ns = NumberOfSignals.Value;
+            Labels.Read(reader, ns);
+            TransducerType.Read(reader, ns);
+            PhysicalDimension.Read(reader, ns);
+            PhysicalMinimum.Read(reader, ns);
+            PhysicalMaximum.Read(reader, ns);
+            DigitalMinimum.Read(reader, ns);
+            DigitalMaximum.Read(reader, ns);
+            Prefiltering.Read(reader, ns);
+            NumberOfSamplesInDataRecord.Read(reader, ns);
+            SignalsReserved.Read(reader, ns);
+
+
+            //
+            int j = 0;
+            for (int i = 0; i < NumberOfSignals.Value; i++)
+            {
+                if (!Annotation[i])
+                    MappedSignals[j++] = i;
+            }
+
+            for (int i = 0; i < NumberOfSignals.Value; i++)
+            {
+                RecordSize += NumberOfSamplesInDataRecord.Value[i];
+            }
+            RecordSize *= 2;
+
+            long n = 0L;
+            for (int i = 0; i < NumberOfSignals.Value; i++)
+            {
+                BufOffset[i] = n;
+                n += NumberOfSamplesInDataRecord.Value[i] * 2;
+            }
+
+            for (int i = 0; i < NumberOfSignals.Value; i++)
+            {
+                double physicalMax = PhysicalMaximum.Value[i];
+                double physicalMin = PhysicalMinimum.Value[i];
+
+                double digitalMax = DigitalMaximum.Value[i];
+                double digitalMin = DigitalMinimum.Value[i];
+
+                BitValues[i] = (physicalMax - physicalMin) / (digitalMax - digitalMin);
+                Offsets[i] = physicalMax / BitValues[i] - digitalMax;
+            }
+
         }
 
         public override string ToString()

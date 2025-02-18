@@ -8,15 +8,15 @@ namespace Parser.Test
         {
             string edfFilePath = @"D:\code\psd_csharp\nunit.test\asserts\X.edf";
 
-            Parser p = new Parser();
-            (HeaderRecord headerRecord, int handle) = p.Open(edfFilePath);
-            double[] buf = p.ReadPhsyicalSamples(handle, 29, 10);
-            for (int i = 0; i < buf.Length; i++)
+            using (Reader reader = new Reader(edfFilePath))
             {
-                Console.WriteLine(buf[i]);
+                reader.ReadHeader();
+                double[] buf = reader.ReaderData(0, 501);
+                for (int i = 0; i < buf.Length; i++)
+                {
+                    Console.WriteLine(buf[i]);
+                }
             }
-
-            p.Close();
         }
     }
 }

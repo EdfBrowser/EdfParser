@@ -1,87 +1,26 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Text;
 
 namespace Parser
 {
-    internal class Reader : BinaryReader
+    internal class HeaderReader
     {
-        private HeaderRecord _curHeadRecord;
-
-        internal Reader(Stream stream) : base(stream) { }
-
-        internal HeaderRecord ReadHeaderRecord()
+        internal HeaderRecord Read(BinaryReader reader)
         {
-            HeaderRecord h = new HeaderRecord();
-
-            //--------------Fixed length------------
-            h.Version.Value = ReadAscii(h.Version.AsciiLength);
-            h.PatientID.Value = ReadAscii(h.PatientID.AsciiLength);
-            h.RecordID.Value = ReadAscii(h.RecordID.AsciiLength);
-            h.StartDate.Value = ReadAscii(h.StartDate.AsciiLength);
-            h.StartTime.Value = ReadAscii(h.StartTime.AsciiLength);
-            h.NumberOfBytesInHeader.Value = ReadInt(h.NumberOfBytesInHeader.AsciiLength);
-            h.Reserved.Value = ReadAscii(h.Reserved.AsciiLength);
-            h.NumberOfDataRecords.Value = ReadInt(h.NumberOfDataRecords.AsciiLength);
-            h.DurationOfDataRecord.Value = ReadInt(h.DurationOfDataRecord.AsciiLength);
-            h.NumberOfSignals.Value = ReadInt(h.NumberOfSignals.AsciiLength);
-
-            //--------------Mutable length-----------
-            int ns = h.NumberOfSignals.Value;
-            h.Labels.Value = ReadMultipleAscii(h.Labels.AsciiLength, ns);
-            h.TransducerType.Value = ReadMultipleAscii(h.TransducerType.AsciiLength, ns);
-            h.PhysicalDimension.Value = ReadMultipleAscii(h.PhysicalDimension.AsciiLength, ns);
-            h.PhysicalMinimum.Value = ReadMultipleDouble(h.PhysicalMinimum.AsciiLength, ns);
-            h.PhysicalMaximum.Value = ReadMultipleDouble(h.PhysicalMaximum.AsciiLength, ns);
-            h.DigitalMinimum.Value = ReadMultipleInt(h.DigitalMinimum.AsciiLength, ns);
-            h.DigitalMaximum.Value = ReadMultipleInt(h.DigitalMaximum.AsciiLength, ns);
-            h.Prefiltering.Value = ReadMultipleAscii(h.Prefiltering.AsciiLength, ns);
-            h.NumberOfSamplesInDataRecord.Value = ReadMultipleInt(h.NumberOfSamplesInDataRecord.AsciiLength, ns);
-            h.SignalsReserved.Value = ReadMultipleAscii(h.SignalsReserved.AsciiLength, ns);
-
-            //
-            int j = 0;
-            for (int i = 0; i < h.NumberOfSignals.Value; i++)
-            {
-                if (!h.Annotation[i])
-                    h.MappedSignals[j++] = i;
-            }
-
-            for (int i = 0; i < h.NumberOfSignals.Value; i++)
-            {
-                h.RecordSize += h.NumberOfSamplesInDataRecord.Value[i];
-            }
-            h.RecordSize *= 2;
-
-            long n = 0L;
-            for (int i = 0; i < h.NumberOfSignals.Value; i++)
-            {
-                h.BufOffset[i] = n;
-                n += h.NumberOfSamplesInDataRecord.Value[i] * 2;
-            }
-
-            for (int i = 0; i < h.NumberOfSignals.Value; i++)
-            {
-                double physicalMax = h.PhysicalMaximum.Value[i];
-                double physicalMin = h.PhysicalMinimum.Value[i];
-
-                double digitalMax = h.DigitalMaximum.Value[i];
-                double digitalMin = h.DigitalMinimum.Value[i];
-
-                h.BitValues[i] = (physicalMax - physicalMin) / (digitalMax - digitalMin);
-                h.Offsets[i] = physicalMax / h.BitValues[i] - digitalMax;
-            }
-
-            _curHeadRecord = h;
-
-            return h;
+            var header = new HeaderRecord();
+            header.Read(reader);
+            return header;
         }
+    }
 
-
-        public double[] ReadPhsyicalSamples(int signal, long count)
+    internal class DataReader
+    {
+        internal double[] Read(BinaryReader reader, HeaderRecord headerRecord,
+            int signal, int count)
         {
-            if (signal < 0 || signal >= _curHeadRecord.NumberOfSignals.Value)
+            int ns = headerRecord.NumberOfSignals.Value;
+
+            if (signal < 0 || signal >= ns)
                 throw new ArgumentException($"The {nameof(signal)} value is out of the valid range!");
 
             if (count < 0)
@@ -90,15 +29,17 @@ namespace Parser
             if (count == 0)
                 return Array.Empty<double>();
 
-            int channel = _curHeadRecord.MappedSignals[signal];
-
             int bytesPerSmp = 2;
 
-            int smpInFile = _curHeadRecord.NumberOfSamplesInDataRecord.Value[channel]
-                * _curHeadRecord.NumberOfDataRecords.Value;
-            if ((_curHeadRecord.SamplePos[channel] + count) > smpInFile)
+            int channel = headerRecord.MappedSignals[signal];
+            int smpPos = headerRecord.SamplePos[channel];
+            int smpPerRecord = headerRecord.NumberOfSamplesInDataRecord.Value[channel];
+            int smpInFile = smpPerRecord * headerRecord.NumberOfDataRecords.Value;
+
+            // 如果 count 大于文件内剩余的样本数，则调整 count 为文件剩余的样本数
+            if ((smpPos + count) > smpInFile)
             {
-                count = smpInFile - _curHeadRecord.SamplePos[channel];
+                count = smpInFile - smpPos;
                 if (count == 0)
                     return Array.Empty<double>();
 
@@ -108,117 +49,118 @@ namespace Parser
 
             double[] buf = new double[count];
 
-            long offset = 256 + _curHeadRecord.NumberOfSignals.Value * 256;
+            // 头部分大小
+            long offset = 256 + ns * 256;
+            // 之前读取到第几块了
+            offset += (smpPos / smpPerRecord) * headerRecord.RecordSize;
+            // 该channel在块中偏移多少字节
+            offset += headerRecord.BufOffset[channel];
+            // 从当前块开始偏移了多少字节
+            offset += (smpPos % smpPerRecord) * bytesPerSmp;
 
-            offset += (_curHeadRecord.SamplePos[channel] / _curHeadRecord.NumberOfSamplesInDataRecord.Value[channel])
-                * _curHeadRecord.RecordSize;
+            reader.BaseStream.Seek(offset, SeekOrigin.Begin);
 
-            offset += _curHeadRecord.BufOffset[channel];
-
-            offset += (_curHeadRecord.SamplePos[channel] % _curHeadRecord.NumberOfSamplesInDataRecord.Value[channel])
-                * bytesPerSmp;
-
-            BaseStream.Seek(offset, SeekOrigin.Begin);
-
-            long smpPos = _curHeadRecord.SamplePos[channel];
-            int smpPerRecord = _curHeadRecord.NumberOfSamplesInDataRecord.Value[channel];
             // 假如当前的位置是dataRecord的末尾，需要跳到下一块的开始
-            long jump = _curHeadRecord.RecordSize - (smpPerRecord * bytesPerSmp);
+            long jump = headerRecord.RecordSize - (smpPerRecord * bytesPerSmp);
 
             for (int i = 0; i < count; i++)
             {
-                if (smpPos % smpPerRecord == 0)
-                {
-                    if (i > 0)
-                    {
-                        BaseStream.Seek(jump, SeekOrigin.Current);
-                    }
-                }
+                // 在当前块中读完了该channel的所有samples
+                // 并且需要排除当前指向channel数据块开头的情况
+                if ((smpPos % smpPerRecord == 0) && i > 0)
+                    reader.BaseStream.Seek(jump, SeekOrigin.Current);
 
-                byte one = ReadByte();
-                if (PeekChar() == -1)
-                {
-                    throw new ArgumentException("The stream is on the end");
-                }
-
-                byte two = ReadByte();
-                double val = BitConverter.ToInt16(new byte[] { one, two }, 0);
-
-                buf[i] = _curHeadRecord.BitValues[channel] * (val + _curHeadRecord.Offsets[channel]);
+                byte[] smp = reader.ReadBytes(bytesPerSmp);
+                double val = BitConverter.ToInt16(smp, 0);
+                buf[i] = headerRecord.BitValues[channel] * (val + headerRecord.Offsets[channel]);
 
                 smpPos++;
             }
 
-            _curHeadRecord.SamplePos[channel] = smpPos;
+            headerRecord.SamplePos[channel] = smpPos;
 
             return buf;
         }
+    }
 
+    public class Reader : IDisposable
+    {
+        private readonly Stream _stream;
+        private readonly BinaryReader _binaryReader;
+        private readonly HeaderReader _headerReader;
+        private readonly DataReader _dataReader;
 
-        private int ReadInt(int asciiLength)
+        private HeaderRecord _headerRecord;
+        private bool _disposed;
+
+        public Reader(Stream stream)
         {
-            string strInt = ReadAscii(asciiLength).Trim();
-            int intResult = -1;
+            _disposed = false;
 
-            try
-            {
-                intResult = Convert.ToInt32(strInt);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Couldn`t convert string to integer. " + ex.Message);
-            }
-
-            return intResult;
+            _stream = stream
+                ?? throw new ArgumentNullException($"{nameof(stream)} is null!");
+            _binaryReader = new BinaryReader(stream);
+            _headerReader = new HeaderReader();
+            _dataReader = new DataReader();
         }
 
-        private string ReadAscii(int asciiLength)
+        public Reader(string edfFilePath)
+            : this(GetStreamFromFilePath(edfFilePath)) { }
+
+        ~Reader()
         {
-            byte[] bytes = ReadBytes(asciiLength);
-            return AsciiString(bytes);
+            Dispose(false); // Clean up the unmanaged resources.
         }
 
-        private string[] ReadMultipleAscii(int asciiLength, int ns)
+        private static Stream GetStreamFromFilePath(string filePath)
         {
-            var parts = new List<string>();
+            if (string.IsNullOrEmpty(filePath))
+                throw new ArgumentException($"{nameof(filePath)} is null or empty!", nameof(filePath));
 
-            for (int i = 0; i < ns; i++)
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException($"The file at path {filePath} was not found!", filePath);
+
+            return File.OpenRead(filePath);
+        }
+
+        public HeaderRecord ReadHeader()
+        {
+            _headerRecord = _headerReader.Read(_binaryReader);
+            return _headerRecord;
+        }
+
+        public double[] ReaderData(int signal, int count)
+        {
+            if (_headerRecord == null)
+                ReadHeader();
+
+            return _dataReader.Read(_binaryReader, _headerRecord, signal, count);
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (_disposed)
+                return;
+
+            if (disposing)
             {
-                byte[] bytes = ReadBytes(asciiLength);
-                parts.Add(AsciiString(bytes));
+                // 垃圾回收期可能让_binaryReader释放了，所以无法调用成功（也就是无法做到
+                // 十全十美）
+                // Dispose managed
+                _binaryReader.Dispose();
             }
 
-            return parts.ToArray();
+            // Dispose unmanaged
+            if (_stream != null)
+                _stream.Dispose();
+
+            _disposed = true;
         }
-
-        private int[] ReadMultipleInt(int asciiLength, int ns)
-        {
-            var parts = new List<int>();
-
-            for (int i = 0; i < ns; i++)
-            {
-                byte[] bytes = ReadBytes(asciiLength);
-                string ascii = AsciiString(bytes);
-                parts.Add(Convert.ToInt32(ascii));
-            }
-
-            return parts.ToArray();
-        }
-
-        private double[] ReadMultipleDouble(int asciiLength, int ns)
-        {
-            var parts = new List<double>();
-
-            for (int i = 0; i < ns; i++)
-            {
-                byte[] bytes = this.ReadBytes(asciiLength);
-                string ascii = AsciiString(bytes);
-                parts.Add(Convert.ToDouble(ascii));
-            }
-
-            return parts.ToArray();
-        }
-
-        private string AsciiString(byte[] bytes) => Encoding.ASCII.GetString(bytes);
     }
 }
