@@ -7,11 +7,19 @@ namespace Parser
 {
     internal class HeaderReader
     {
-        internal HeaderRecord Read(BinaryReader reader)
+        private readonly BinaryReader _binaryReader;
+
+        public HeaderReader(BinaryReader binaryReader)
         {
-            var header = new HeaderRecord();
-            header.Read(reader);
-            return header;
+            _binaryReader = binaryReader;
+        }
+
+        internal void Read(HeaderRecord headerRecord)
+        {
+            if (headerRecord == null)
+                throw new ArgumentNullException("headerRecord");
+
+            headerRecord.Read(_binaryReader);
         }
     }
 
@@ -149,7 +157,8 @@ namespace Parser
                 // 计算当前批次要读取的样本数
                 int batchCount = Math.Min(BATCHSIZE, count - currentIndex);
                 byte[] dataBatch = new byte[batchCount * _bytesPerSmp];
-                await _binaryReader.BaseStream.ReadAsync(dataBatch, 0, batchCount * _bytesPerSmp);
+                await _binaryReader.BaseStream
+                    .ReadAsync(dataBatch, 0, batchCount * _bytesPerSmp);
 
                 // 处理读取的数据
                 for (int j = 0; j < batchCount; j++)
@@ -170,47 +179,81 @@ namespace Parser
 
     public class Reader : IDisposable
     {
-        private readonly Stream _stream;
-        private readonly BinaryReader _binaryReader;
-        private readonly HeaderReader _headerReader;
-        private readonly DataReader _dataReader;
-
-        private readonly HeaderRecord _headerRecord;
+        private Stream _stream;
+        private BinaryReader _binaryReader;
+        private HeaderReader _headerReader;
+        private DataReader _dataReader;
+        private HeaderRecord _headerRecord;
         private bool _disposed;
 
-        public Reader(Stream stream)
+        public Reader()
         {
             _disposed = false;
-
-            _stream = stream
-                ?? throw new ArgumentNullException($"{nameof(stream)} is null!");
-            _binaryReader = new BinaryReader(stream);
-            _headerReader = new HeaderReader();
-            _headerRecord = _headerReader.Read(_binaryReader);
-            _dataReader = new DataReader(_headerRecord, _binaryReader);
         }
-
-        public Reader(string edfFilePath)
-            : this(GetStreamFromFilePath(edfFilePath)) { }
 
         ~Reader()
         {
             Dispose(false); // Clean up the unmanaged resources.
         }
 
-        private static Stream GetStreamFromFilePath(string filePath)
+        public void Initial(Stream stream)
         {
-            if (string.IsNullOrEmpty(filePath))
-                throw new ArgumentException($"{nameof(filePath)} is null or empty!", nameof(filePath));
+            _stream = stream
+               ?? throw new ArgumentNullException($"{nameof(stream)} is null!");
+            _binaryReader = new BinaryReader(stream);
 
-            if (!File.Exists(filePath))
-                throw new FileNotFoundException($"The file at path {filePath} was not found!", filePath);
+            _headerReader = new HeaderReader(_binaryReader);
 
-            return File.OpenRead(filePath);
+            _headerRecord = new HeaderRecord();
+            _headerReader.Read(_headerRecord);
+
+            _dataReader = new DataReader(_headerRecord, _binaryReader);
+        }
+
+
+        public async Task<EdfInfo> ReadEdfInfoAsync()
+        {
+            string date = _headerRecord.StartDate.Value;
+            string time = _headerRecord.StartTime.Value;
+
+            string[] dateParts = date.Split('.');
+            int day = Convert.ToInt32(dateParts[0]);
+            int month = Convert.ToInt32(dateParts[1]);
+            int year = Convert.ToInt32(dateParts[2]);
+            year = year > 84 ? year + 1900 : year + 2000;
+
+            string[] timeParts = time.Split('.');
+            int hour = Convert.ToInt32(timeParts[0]);
+            int minute = Convert.ToInt32(timeParts[1]);
+            int second = Convert.ToInt32(timeParts[2]);
+
+            DateTime dt = new DateTime(year, month, day, hour, minute, second);
+
+            int dataRecords = _headerRecord.NumberOfDataRecords.Value;
+            int duration = _headerRecord.DurationOfDataRecord.Value;
+            int signals = _headerRecord.NumberOfSignals.Value;
+
+            SignalInfo[] signalInfos = new SignalInfo[signals];
+            for (int i = 0; i < signals; i++)
+            {
+                int channel = _headerRecord.MappedSignals[i];
+                string label = _headerRecord.Labels.Value[i];
+                string dimension = _headerRecord.PhysicalDimension.Value[i];
+                string prefiltering = _headerRecord.Prefiltering.Value[i];
+                int samples = _headerRecord.NumberOfSamplesInDataRecord.Value[i];
+
+                SignalInfo signalInfo = new SignalInfo(channel, label, dimension, prefiltering, samples);
+
+                signalInfos[i] = signalInfo;
+            }
+
+            EdfInfo edfInfo = new EdfInfo(dt, dataRecords, duration, signals, signalInfos);
+
+            return await Task.FromResult(edfInfo);
         }
 
         public async Task<int> ReadDataAsync(int signal, double[] buf)
-            => await _dataReader.ReadCore(signal, buf).ConfigureAwait(false);
+            => await _dataReader.ReadCore(signal, buf);
 
         //public double[] ReadFromMemoryMappingFile(string file, int signal, int count)
         //{
